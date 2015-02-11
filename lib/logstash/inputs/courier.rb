@@ -107,10 +107,25 @@ module LogStash
       public
 
       def run(output_queue)
-        @log_courier.run do |event|
-          event = LogStash::Event.new(event)
-          decorate event
-          output_queue << event
+        @log_courier.run do |receive_events|
+          ack_spool = nil
+          event_count = 0
+
+          # This assumes events arrive in a meaningful order
+          # so the count can identify events when calling ack_events_sofar.
+          receive_events.call do |event, ack_events_sofar|
+            event = LogStash::Event.new(event)
+            decorate event
+            output_queue << event
+
+            ack_spool = ack_events_sofar
+            event_count += 1
+            # todo(alcinnz): Restore partial acks to avoid duplicate events.
+            # These should be sent every 5s (which would ideally be configurable).
+          end
+
+          # Acknowledge the full spool.
+          ack_spool.call event_count if !ack_spool.nil?
         end
       end
     end

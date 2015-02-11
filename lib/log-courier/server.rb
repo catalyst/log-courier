@@ -69,7 +69,9 @@ module LogCourier
         when 'PING'
           process_ping message, comm
         when 'JDAT'
-          process_jdat message, comm, &block
+          yield(Proc.new do |&block|
+            process_jdat message, comm, &block
+          end) # Yield now indicates a spool of events, not individuals.
         else
           if comm.peer.nil?
             @logger.warn 'Unknown message received', :from => 'unknown' unless @logger.nil?
@@ -99,9 +101,6 @@ module LogCourier
     end
 
     def process_jdat(message, comm)
-      # Now we have the data, aim to respond within 5 seconds
-      ack_timeout = Time.now.to_i + 5
-
       # OK - first is a nonce - we send this back with sequence acks
       # This allows the client to know what is being acknowledged
       # Nonce is 16 so check we have enough
@@ -123,9 +122,6 @@ module LogCourier
       # Message now contains JSON encoded events
       # They are aligned as [length][event]... so on
       # We acknowledge them by their 1-index position in the stream
-      # A 0 sequence acknowledgement means we haven't processed any yet
-      sequence = 0
-      events = []
       length_buf = ''
       data_buf = ''
       loop do
@@ -167,25 +163,13 @@ module LogCourier
         comm.add_fields event
 
         # Queue the event
-        begin
-          yield event
-        rescue TimeoutError
-          # Full pipeline, partial ack
-          # NOTE: comm.send can raise a Timeout::Error of its own
-          # todo(alcinnz): Restore this functionality, broke with removal of the server thread and the queue.
-          @logger.debug 'Partially acknowledging message', :nonce => nonce_str.join, :sequence => sequence if !@logger.nil? && @logger.debug?
+        yield(event, Proc.new do |sequence|
+          @logger.debug 'Acknowledging message', :nonce => nonce_str.join, :sequence => sequence if !@logger.nil? && @logger.debug?
           comm.send 'ACKN', [nonce, sequence].pack('A*N')
-          ack_timeout = Time.now.to_i + 5
-          retry
-        end
+        end)
 
-        sequence += 1
       end
 
-      # Acknowledge the full message
-      # NOTE: comm.send can raise a Timeout::Error
-      @logger.debug 'Acknowledging message', :nonce => nonce_str.join, :sequence => sequence if !@logger.nil? && @logger.debug?
-      comm.send 'ACKN', [nonce, sequence].pack('A*N')
       return
     end
   end
