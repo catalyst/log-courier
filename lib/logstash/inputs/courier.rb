@@ -76,6 +76,13 @@ module LogStash
       # using client certificates
       config :add_peer_fields, :validate => :boolean
 
+      # A flag to signal that we want messages to ack only when they've gone into an
+      # ha output.
+      #
+      # This only works if you flag an output with provides_ha
+      # e.g. elasticsearch with 3 nodes, and it's output declaring provides_ha => true
+      config :needs_ha, :validate => :boolean, :default => false
+
       public
 
       def register
@@ -107,25 +114,35 @@ module LogStash
       public
 
       def run(output_queue)
+        bundle_class = if @needs_ha then LogStash::EventBundle::HA else LogStash::EventBundle end
         @log_courier.run do |receive_events|
           ack_spool = nil
           event_count = 0
+          bundle = bundle_class.new
+          last_ack_time = Time.now.tv_sec
 
           # This assumes events arrive in a meaningful order
           # so the count can identify events when calling ack_events_sofar.
           receive_events.call do |event, ack_events_sofar|
             event = LogStash::Event.new(event)
             decorate event
+            bundle.add event
             output_queue << event
 
             ack_spool = ack_events_sofar
             event_count += 1
             # todo(alcinnz): Restore partial acks to avoid duplicate events.
             # These should be sent every 5s (which would ideally be configurable).
+            if Time.now.tv_sec - last_ack_time >= 5
+              ack_events_sofar.call(if @needs_ha then 0 else event_count end)
+              last_ack_time = Time.now.sec
+            end
           end
 
           # Acknowledge the full spool.
-          ack_spool.call event_count if !ack_spool.nil?
+          bundle.close(Proc.new do
+            ack_spool.call event_count if !ack_spool.nil?
+          end)
         end
       end
     end
