@@ -63,40 +63,22 @@ module LogCourier
     end
 
     def run(&block)
-      # TODO: Make queue size configurable
-      event_queue = EventQueue.new 1
-      server_thread = nil
-
-      begin
-        server_thread = Thread.new do
-          # Receive messages and process them
-          @server.run do |signature, message, comm|
-            case signature
-            when 'PING'
-              process_ping message, comm
-            when 'JDAT'
-              process_jdat message, comm, event_queue
-            else
-              if comm.peer.nil?
-                @logger.warn 'Unknown message received', :from => 'unknown' unless @logger.nil?
-              else
-                @logger.warn 'Unknown message received', :from => comm.peer unless @logger.nil?
-              end
-              # Don't kill a client that sends a bad message
-              # Just reject it and let it send it again, potentially to another server
-              comm.send '????', ''
-            end
+      # Receive messages and process them
+      @server.run do |signature, message, comm|
+        case signature
+        when 'PING'
+          process_ping message, comm
+        when 'JDAT'
+          process_jdat message, comm, &block
+        else
+          if comm.peer.nil?
+            @logger.warn 'Unknown message received', :from => 'unknown' unless @logger.nil?
+          else
+            @logger.warn 'Unknown message received', :from => comm.peer unless @logger.nil?
           end
-        end
-
-        loop do
-          block.call event_queue.pop
-        end
-      ensure
-        # Signal the server thread to stop
-        unless server_thread.nil?
-          server_thread.raise ShutdownSignal
-          server_thread.join
+          # Don't kill a client that sends a bad message
+          # Just reject it and let it send it again, potentially to another server
+          comm.send '????', ''
         end
       end
       return
@@ -116,7 +98,7 @@ module LogCourier
       return
     end
 
-    def process_jdat(message, comm, event_queue)
+    def process_jdat(message, comm)
       # Now we have the data, aim to respond within 5 seconds
       ack_timeout = Time.now.to_i + 5
 
@@ -186,10 +168,11 @@ module LogCourier
 
         # Queue the event
         begin
-          event_queue.push event, [0, ack_timeout - Time.now.to_i].max
+          yield event
         rescue TimeoutError
           # Full pipeline, partial ack
           # NOTE: comm.send can raise a Timeout::Error of its own
+          # todo(alcinnz): Restore this functionality, broke with removal of the server thread and the queue.
           @logger.debug 'Partially acknowledging message', :nonce => nonce_str.join, :sequence => sequence if !@logger.nil? && @logger.debug?
           comm.send 'ACKN', [nonce, sequence].pack('A*N')
           ack_timeout = Time.now.to_i + 5
