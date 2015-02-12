@@ -161,6 +161,7 @@ func (p *Publisher) Run() {
 
 	timer := time.NewTimer(keepalive_timeout)
 	stats_timer := time.NewTimer(time.Second)
+	reconnect_timer := time.NewTimer(time.Second)
 
 	control_signal := p.OnShutdown()
 	delay_shutdown := func() {
@@ -233,9 +234,11 @@ PublishLoop:
 
 		timer.Reset(keepalive_timeout)
 		stats_timer.Reset(time.Second)
+		reconnect_timer.Reset(time.Second)
 
 		p.pending_ping = false
 		input_toggle = nil
+		restart = false
 		p.can_send = p.transport.CanSend()
 
 	SelectLoop:
@@ -288,7 +291,7 @@ PublishLoop:
 				}
 
 				// No pending payloads, are we shutting down? Skip if so
-				if p.shutdown {
+				if p.shutdown || reload != core.Reload_None {
 					break
 				}
 
@@ -390,6 +393,20 @@ PublishLoop:
 
 				// Allow network timeout to receive something
 				timer.Reset(p.config.Timeout)
+			case <-reconnect_timer.C:
+				log.Debug("Reconnecting...")
+				if p.num_payloads == 0 {
+					break SelectLoop
+				}
+
+				log.Debug("later.")
+				// Wait for the acknowledgements before restarting
+				// This code is based on delayShutdown
+				input_toggle = nil
+				reload = core.Reload_Transport
+
+				// Give time for packets to return
+				reconnect_timer.Reset(time.Second)
 			case <-control_signal:
 				// If no pending payloads, simply end
 				if p.num_payloads == 0 {
